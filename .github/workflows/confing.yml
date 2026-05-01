@@ -1,4 +1,4 @@
-name: Radare2 + Ngrok Tunnel
+name: Radare2 + Cloudflared Tunnel
 
 on:
   workflow_dispatch:
@@ -28,15 +28,11 @@ jobs:
           sudo apt install -y radare2
           r2 -v
 
-      - name: Install ngrok
+      - name: Install cloudflared
         run: |
-          curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz
-          sudo mv ngrok /usr/local/bin/
-
-      - name: Set up ngrok auth
-        env:
-          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-        run: ngrok config add-authtoken $NGROK_AUTH_TOKEN
+          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          cloudflared --version
 
       - name: Download or use binary
         run: |
@@ -66,21 +62,23 @@ jobs:
           sleep 3
           netstat -tlnp 2>/dev/null | grep 9090 || ss -tlnp | grep 9090
 
-      - name: Start ngrok tunnel
+      - name: Start cloudflared tunnel
         run: |
-          ngrok tcp 9090 --log=stdout > ngrok.log 2>&1 &
-          NGROK_PID=$!
-          echo "NGROK_PID=$NGROK_PID" >> $GITHUB_ENV
+          cloudflared tunnel --url tcp://localhost:9090 --logfile cloudflared.log &
+          CLOUDFLARED_PID=$!
+          echo "CLOUDFLARED_PID=$CLOUDFLARED_PID" >> $GITHUB_ENV
           sleep 5
           
-          # Извлекаем адрес туннеля
-          TUNNEL_URL=$(cat ngrok.log | grep -o 'tcp://[0-9a-z.-]*:[0-9]*' | head -1)
+          # Извлекаем URL туннеля
+          TUNNEL_URL=$(grep -o 'https://[a-z0-9.-]*\.trycloudflare\.com' cloudflared.log | head -1)
           echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
           echo "========================================="
-          echo "🔌 ПОДКЛЮЧАЙСЯ: $TUNNEL_URL"
-          echo "========================================="
-          echo "Команда: r2 $TUNNEL_URL"
-          echo "Или: r2 rap://$(echo $TUNNEL_URL | cut -d'/' -f3)"
+          echo "🔌 ПОДКЛЮЧАЙСЯ ЧЕРЕЗ CLOUDFLARED:"
+          echo "   r2 rap://$(echo $TUNNEL_URL | sed 's|https://||')?x"
+          echo ""
+          echo "ИЛИ вручную:"
+          echo "   cloudflared access tcp --hostname $(echo $TUNNEL_URL | sed 's|https://||') --url localhost:1313"
+          echo "   r2 rap://localhost:1313"
           echo "========================================="
 
       - name: Keep tunnel alive
@@ -88,16 +86,15 @@ jobs:
           echo "Туннель активен. Нажми Ctrl+C для остановки."
           echo "URL: $TUNNEL_URL"
           while true; do
-            # Проверяем процессы каждые 30 секунд
             if ! kill -0 $R2_PID 2>/dev/null; then
               echo "⚠️ r2 сервер упал, перезапускаем..."
               r2 -c "=H 9090" -q "$BINARY" &
               R2_PID=$!
             fi
-            if ! kill -0 $NGROK_PID 2>/dev/null; then
-              echo "⚠️ ngrok упал, перезапускаем..."
-              ngrok tcp 9090 --log=stdout > ngrok.log 2>&1 &
-              NGROK_PID=$!
+            if ! kill -0 $CLOUDFLARED_PID 2>/dev/null; then
+              echo "⚠️ cloudflared упал, перезапускаем..."
+              cloudflared tunnel --url tcp://localhost:9090 --logfile cloudflared.log &
+              CLOUDFLARED_PID=$!
             fi
             sleep 30
           done
