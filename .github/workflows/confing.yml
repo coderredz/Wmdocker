@@ -1,0 +1,19 @@
+name: SSH via Cloudflare
+
+on:
+  workflow_dispatch:
+
+jobs:
+  connect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Connect to remote server via Cloudflare Tunnel
+        uses: npgy/cloudflared-ssh-action@v2.0
+        with:
+          host: ${{ vars.HOST }}
+          username: ${{ secrets.USERNAME }}
+          private_key: ${{ secrets.PRIVKEY }}
+          port: ${{ secrets.PORT }}
+          commands: |
+            ls
