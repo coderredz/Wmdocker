@@ -1,0 +1,136 @@
+name: Radare2 + Ngrok Tunnel (Stable)
+
+on:
+  workflow_dispatch:
+    inputs:
+      binary_path:
+        description: 'Путь к бинарному файлу в репозитории'
+        required: true
+        default: 'files/libtarget.so'
+        type: string
+      binary_url:
+        description: 'Или URL для скачивания бинарника'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  tunnel:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install radare2
+        run: |
+          sudo apt update
+          sudo apt install -y radare2
+          r2 -v
+
+      - name: Install ngrok
+        run: |
+          curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz
+          sudo mv ngrok /usr/local/bin/
+
+      - name: Set up ngrok auth
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: ngrok config add-authtoken $NGROK_AUTH_TOKEN
+
+      - name: Download or use binary
+        run: |
+          if [ -n "${{ inputs.binary_url }}" ]; then
+            echo "Скачиваю с URL: ${{ inputs.binary_url }}"
+            wget -O target_binary "${{ inputs.binary_url }}"
+            chmod +x target_binary
+            BINARY_PATH="target_binary"
+          else
+            BINARY_PATH="${{ inputs.binary_path }}"
+          fi
+          
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo "Файл $BINARY_PATH не найден!"
+            exit 1
+          fi
+          
+          echo "BINARY=$BINARY_PATH" >> $GITHUB_ENV
+          ls -la "$BINARY_PATH"
+
+      - name: Start radare2 server with auto-restart
+        run: |
+          # Запускаем r2 с перезапуском при падении
+          (
+            while true; do
+              echo "Запускаю r2 сервер на файле: $BINARY"
+              r2 -c "=H 9090" -q "$BINARY"
+              echo "r2 упал, перезапуск через 2 секунды..."
+              sleep 2
+            done
+          ) &
+          echo "R2_WATCHER_PID=$!" >> $GITHUB_ENV
+          sleep 3
+
+      - name: Start ngrok with auto-restart
+        run: |
+          # Запускаем ngrok с перезапуском и сохранением лога
+          (
+            while true; do
+              echo "Запускаю ngrok..."
+              rm -f ngrok.log
+              ngrok tcp 9090 --log=stdout > ngrok.log 2>&1
+              echo "ngrok упал, перезапуск через 3 секунды..."
+              sleep 3
+            done
+          ) &
+          echo "NGROK_WATCHER_PID=$!" >> $GITHUB_ENV
+          sleep 8
+
+      - name: Get tunnel URL
+        run: |
+          # Ждём появления URL через API ngrok
+          for i in {1..20}; do
+            sleep 2
+            TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o 'tcp://[0-9a-z.-]*:[0-9]*' | head -1)
+            if [ -n "$TUNNEL_URL" ]; then
+              echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+              break
+            fi
+          done
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "⚠️ Не удалось получить URL через API, пробую из лога..."
+            TUNNEL_URL=$(cat ngrok.log | grep -o 'tcp://[0-9a-z.-]*:[0-9]*' | head -1)
+            echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+          fi
+          
+          echo "========================================="
+          echo "🔌 ПОДКЛЮЧАЙСЯ:"
+          echo "   $TUNNEL_URL"
+          echo ""
+          echo "Команда для r2:"
+          echo "   r2 rap://$(echo $TUNNEL_URL | cut -d'/' -f3)"
+          echo "========================================="
+
+      - name: Keep tunnel alive
+        run: |
+          # Мониторим процессы и выводим URL каждые 5 минут
+          echo "Туннель активен. URL: $TUNNEL_URL"
+          echo ""
+          echo "Подключение: r2 rap://$(echo $TUNNEL_URL | cut -d'/' -f3)"
+          echo ""
+          
+          while true; do
+            # Проверяем доступность каждые 30 секунд
+            if ! curl -s http://localhost:4040/api/tunnels > /dev/null 2>&1; then
+              echo "⚠️ Ngrok API недоступен, но watcher перезапустит его"
+            fi
+            
+            # Каждые 5 минут напоминаем URL
+            for i in {1..10}; do
+              sleep 30
+              # Тихий цикл, без спама
+            done
+            
+            echo "💡 Туннель всё ещё активен: $TUNNEL_URL"
+          done
